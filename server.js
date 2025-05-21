@@ -9,14 +9,32 @@ const socketHandlers = require('./src/socket/handlers');
 
 // Initialize Express
 const app = express();
-app.use(cors());
 
-// Add basic routes
+// CORS Configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS?.split(',') || [
+  'http://localhost:3000',
+  'https://alma-link.vercel.app'
+];
+
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  credentials: true,
+  allowedHeaders: ["Content-Type", "Authorization"]
+}));
+
+// Utility function for formatted UTC date
+const getFormattedUTCDate = () => {
+  return new Date().toISOString().replace(/T/, ' ').replace(/\..+/, '');
+};
+
+// Basic routes
 app.get('/', (req, res) => {
   res.json({
     message: 'AlmaLink Socket Server',
     status: 'running',
-    timestamp: new Date().toISOString(),
+    timestamp: getFormattedUTCDate(),
+    version: '1.0.0',
     endpoints: {
       health: '/health',
       status: '/status'
@@ -27,17 +45,22 @@ app.get('/', (req, res) => {
 app.get('/health', (req, res) => {
   res.json({ 
     status: 'healthy',
-    timestamp: new Date().toISOString()
+    timestamp: getFormattedUTCDate(),
+    uptime: process.uptime()
   });
 });
+
+let io; // Declare io in wider scope
 
 app.get('/status', (req, res) => {
   res.json({
     service: 'AlmaLink Socket Server',
     status: 'operational',
-    timestamp: new Date().toISOString(),
-    connections: io.engine.clientsCount,
-    uptime: process.uptime()
+    timestamp: getFormattedUTCDate(),
+    connections: io?.engine?.clientsCount || 0,
+    uptime: process.uptime(),
+    memory: process.memoryUsage(),
+    environment: process.env.NODE_ENV
   });
 });
 
@@ -45,18 +68,20 @@ app.get('/status', (req, res) => {
 const httpServer = createServer(app);
 
 // Initialize Socket.IO
-const io = new Server(httpServer, {
-    cors: {
-      origin: ['https://alma-link.vercel.app', 'http://localhost:3000'], // Add all allowed origins
-      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-      credentials: true,
-      allowedHeaders: ["Content-Type", "Authorization"],
-      transports: ['websocket', 'polling']
-    },
-    allowEIO3: true, // Allow Engine.IO version 3
-    pingTimeout: 60000,
-    pingInterval: 25000
-  });
+io = new Server(httpServer, {
+  cors: {
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    credentials: true,
+    allowedHeaders: ["Content-Type", "Authorization"],
+    transports: ['websocket', 'polling']
+  },
+  allowEIO3: true,
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  connectTimeout: 45000,
+  maxHttpBufferSize: 1e8 // 100 MB
+});
 
 // Connect to MongoDB
 connectDB();
@@ -64,31 +89,114 @@ connectDB();
 // Socket.IO Authentication Middleware
 io.use(socketAuth);
 
+// Active connections store
+const activeConnections = new Map();
+
 // Socket.IO Connection Handler
 io.on('connection', (socket) => {
   const handlers = socketHandlers(io);
   
+  // Store connection with timestamp
+  activeConnections.set(socket.id, {
+    userId: socket.userId,
+    userName: socket.userName,
+    connectedAt: getFormattedUTCDate(),
+    userEmail: socket.userEmail
+  });
+  
+  // Log connection
+  console.log('Socket connected:', {
+    socketId: socket.id,
+    userId: socket.userId,
+    userName: socket.userName,
+    timestamp: getFormattedUTCDate()
+  });
+
+  // Initialize connection
   handlers.handleConnection(socket);
 
-  socket.on('private:message', (data) => {
-    handlers.handlePrivateMessage(socket, data);
+  // Handle private messages
+  socket.on('private:message', async (data) => {
+    try {
+      await handlers.handlePrivateMessage(socket, data);
+    } catch (error) {
+      console.error('Message handling error:', {
+        error: error.message,
+        socketId: socket.id,
+        userId: socket.userId,
+        timestamp: getFormattedUTCDate()
+      });
+
+      socket.emit('message:error', {
+        error: 'Failed to process message',
+        messageId: data?.messageId,
+        timestamp: getFormattedUTCDate()
+      });
+    }
   });
 
+  // Handle message read receipts
   socket.on('message:read', (data) => {
-    handlers.handleMessageRead(socket, data);
+    try {
+      handlers.handleMessageRead(socket, data);
+    } catch (error) {
+      console.error('Read receipt error:', {
+        error: error.message,
+        socketId: socket.id,
+        userId: socket.userId,
+        timestamp: getFormattedUTCDate()
+      });
+    }
   });
 
+  // Handle typing indicators
+  socket.on('typing:start', ({ receiverId }) => {
+    socket.to(receiverId).emit('typing:start', {
+      userId: socket.userId,
+      timestamp: getFormattedUTCDate()
+    });
+  });
+
+  socket.on('typing:stop', ({ receiverId }) => {
+    socket.to(receiverId).emit('typing:stop', {
+      userId: socket.userId,
+      timestamp: getFormattedUTCDate()
+    });
+  });
+
+  // Handle disconnection
   socket.on('disconnect', () => {
-    handlers.handleDisconnection(socket);
+    try {
+      handlers.handleDisconnection(socket);
+      activeConnections.delete(socket.id);
+      
+      console.log('Socket disconnected:', {
+        socketId: socket.id,
+        userId: socket.userId,
+        timestamp: getFormattedUTCDate()
+      });
+    } catch (error) {
+      console.error('Disconnect handler error:', {
+        error: error.message,
+        socketId: socket.id,
+        timestamp: getFormattedUTCDate()
+      });
+    }
   });
 });
 
 // Error handling middleware
 app.use((err, req, res, next) => {
-  console.error(err.stack);
+  console.error('Server error:', {
+    error: err.message,
+    stack: err.stack,
+    timestamp: getFormattedUTCDate()
+  });
+  
   res.status(500).json({
-    error: 'Something broke!',
-    message: err.message
+    error: 'Internal Server Error',
+    message: process.env.NODE_ENV === 'development' ? err.message : 'Something went wrong',
+    timestamp: getFormattedUTCDate()
   });
 });
 
@@ -96,16 +204,53 @@ app.use((err, req, res, next) => {
 app.use((req, res) => {
   res.status(404).json({
     error: 'Not Found',
-    message: 'The requested resource was not found'
+    message: 'The requested resource was not found',
+    timestamp: getFormattedUTCDate()
   });
 });
 
+// Start server
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
-  console.log(`Socket server running on port ${PORT}`);
+  console.log(`Server Info:`, {
+    message: `Socket server running on port ${PORT}`,
+    environment: process.env.NODE_ENV,
+    timestamp: getFormattedUTCDate()
+  });
 });
 
-// Handle unhandled promise rejections
+// Handle process errors
 process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Rejection:', err);
+  console.error('Unhandled Rejection:', {
+    error: err.message,
+    stack: err.stack,
+    timestamp: getFormattedUTCDate()
+  });
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', {
+    error: err.message,
+    stack: err.stack,
+    timestamp: getFormattedUTCDate()
+  });
+  
+  // Give the server a grace period to finish existing requests
+  setTimeout(() => {
+    process.exit(1);
+  }, 1000);
+});
+
+// Graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received. Performing graceful shutdown...', {
+    timestamp: getFormattedUTCDate()
+  });
+  
+  httpServer.close(() => {
+    console.log('Server closed', {
+      timestamp: getFormattedUTCDate()
+    });
+    process.exit(0);
+  });
 });
