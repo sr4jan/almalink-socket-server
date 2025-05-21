@@ -1,70 +1,75 @@
-const Message = require('../models/Message');
-
-// Store online users
-const onlineUsers = new Map();
-
 const socketHandlers = (io) => {
-  return {
-    handleConnection: (socket) => {
-      const userId = socket.userId;
-      onlineUsers.set(userId, socket.id);
-      
-      // Broadcast user's online status
-      io.emit('user:online', userId);
-      
-      // Join user's room for private messages
-      socket.join(userId);
-      
-      console.log(`User connected: ${userId}`);
-    },
-
-    handleDisconnection: (socket) => {
-      const userId = socket.userId;
-      onlineUsers.delete(userId);
-      io.emit('user:offline', userId);
-      console.log(`User disconnected: ${userId}`);
-    },
-
-    handlePrivateMessage: async (socket, data) => {
-      try {
-        const { receiverId, content, attachments } = data;
+    const onlineUsers = new Map();
+  
+    return {
+      handleConnection: (socket) => {
+        // Add user to online users
+        onlineUsers.set(socket.userId, socket.id);
         
-        // Create and save message
-        const message = await Message.create({
-          sender: socket.userId,
-          receiver: receiverId,
-          content,
-          attachments
+        // Broadcast user online status
+        socket.broadcast.emit('user:online', {
+          userId: socket.userId,
+          userName: socket.userName
         });
-
-        // Populate message with sender/receiver details
-        const populatedMessage = await Message.findById(message._id)
-          .populate('sender', 'username profile.avatar')
-          .populate('receiver', 'username profile.avatar');
-
-        // Send to receiver if online
+  
+        // Send current online users to connected user
+        const onlineUsersList = Array.from(onlineUsers.keys()).filter(id => id !== socket.userId);
+        socket.emit('users:online', onlineUsersList);
+      },
+  
+      handlePrivateMessage: async (socket, data) => {
+        const { receiverId, content, attachments, messageId } = data;
+        
+        // Get receiver's socket id
         const receiverSocketId = onlineUsers.get(receiverId);
+        
+        // Prepare message data
+        const messageData = {
+          messageId,
+          content,
+          attachments,
+          senderId: socket.userId,
+          senderName: socket.userName,
+          timestamp: new Date().toISOString()
+        };
+  
+        // Send to receiver if online
         if (receiverSocketId) {
-          io.to(receiverSocketId).emit('private:message', populatedMessage);
+          io.to(receiverSocketId).emit('private:message', messageData);
         }
-
-        // Send confirmation to sender
-        socket.emit('message:sent', populatedMessage);
-      } catch (error) {
-        socket.emit('message:error', { error: error.message });
+  
+        // Acknowledge message receipt
+        socket.emit('message:sent', {
+          messageId,
+          status: 'sent',
+          timestamp: new Date().toISOString()
+        });
+      },
+  
+      handleMessageRead: (socket, data) => {
+        const { messageId, senderId } = data;
+        
+        const senderSocketId = onlineUsers.get(senderId);
+        if (senderSocketId) {
+          io.to(senderSocketId).emit('message:read', {
+            messageId,
+            readBy: socket.userId,
+            timestamp: new Date().toISOString()
+          });
+        }
+      },
+  
+      handleDisconnection: (socket) => {
+        // Remove user from online users
+        onlineUsers.delete(socket.userId);
+        
+        // Broadcast user offline status
+        socket.broadcast.emit('user:offline', {
+          userId: socket.userId,
+          timestamp: new Date().toISOString()
+        });
       }
-    },
-
-    handleMessageRead: async (socket, data) => {
-      try {
-        const { messageId } = data;
-        await Message.findByIdAndUpdate(messageId, { read: true });
-        socket.emit('message:read:success', { messageId });
-      } catch (error) {
-        socket.emit('message:read:error', { error: error.message });
-      }
-    }
+    };
   };
-};
-
-module.exports = socketHandlers;
+  
+  module.exports = socketHandlers;
