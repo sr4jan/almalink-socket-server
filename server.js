@@ -11,13 +11,43 @@ const socketHandlers = require('./src/socket/handlers');
 const app = express();
 app.use(cors());
 
+// Add basic routes
+app.get('/', (req, res) => {
+  res.json({
+    message: 'AlmaLink Socket Server',
+    status: 'running',
+    timestamp: new Date().toISOString(),
+    endpoints: {
+      health: '/health',
+      status: '/status'
+    }
+  });
+});
+
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy',
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/status', (req, res) => {
+  res.json({
+    service: 'AlmaLink Socket Server',
+    status: 'operational',
+    timestamp: new Date().toISOString(),
+    connections: io.engine.clientsCount,
+    uptime: process.uptime()
+  });
+});
+
 // Create HTTP Server
 const httpServer = createServer(app);
 
 // Initialize Socket.IO
 const io = new Server(httpServer, {
   cors: {
-    origin: process.env.CLIENT_URL,
+    origin: process.env.CLIENT_URL || '*',
     methods: ["GET", "POST"],
     credentials: true
   }
@@ -48,12 +78,29 @@ io.on('connection', (socket) => {
   });
 });
 
-// Basic health check route
-app.get('/health', (req, res) => {
-  res.json({ status: 'healthy' });
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({
+    error: 'Something broke!',
+    message: err.message
+  });
+});
+
+// Handle 404
+app.use((req, res) => {
+  res.status(404).json({
+    error: 'Not Found',
+    message: 'The requested resource was not found'
+  });
 });
 
 const PORT = process.env.PORT || 4000;
 httpServer.listen(PORT, () => {
   console.log(`Socket server running on port ${PORT}`);
+});
+
+// Handle unhandled promise rejections
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err);
 });
