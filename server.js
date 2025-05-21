@@ -46,12 +46,17 @@ const httpServer = createServer(app);
 
 // Initialize Socket.IO
 const io = new Server(httpServer, {
-  cors: {
-    origin: process.env.CLIENT_URL || '*',
-    methods: ["GET", "POST"],
-    credentials: true
-  }
-});
+    cors: {
+      origin: ['https://alma-link.vercel.app', 'http://localhost:3000'], // Add all allowed origins
+      methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+      credentials: true,
+      allowedHeaders: ["Content-Type", "Authorization"],
+      transports: ['websocket', 'polling']
+    },
+    allowEIO3: true, // Allow Engine.IO version 3
+    pingTimeout: 60000,
+    pingInterval: 25000
+  });
 
 // Connect to MongoDB
 connectDB();
